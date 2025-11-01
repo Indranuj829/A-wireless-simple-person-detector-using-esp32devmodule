@@ -1,0 +1,73 @@
+import tensorflow as tf
+import cv2
+import numpy as np
+import requests
+import time
+
+# ----------------------------
+# ThingSpeak Setup (EDIT THESE)
+# ----------------------------
+THINGSPEAK_WRITE_KEY = "7YJQYRBHDSPM34TC"  # <-- paste from ThingSpeak
+THINGSPEAK_URL = "https://api.thingspeak.com/update"
+UPDATE_INTERVAL = 15   # seconds (ThingSpeak free rate limit)
+# ----------------------------
+
+# Load the TFLite model
+interpreter = tf.lite.Interpreter(model_path="model.tflite")
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Open webcam
+cap = cv2.VideoCapture(0)
+
+# Labels
+labels = ["No Person", "Person"]
+
+def preprocess_frame(frame):
+    frame_resized = cv2.resize(frame, (224, 224))
+    frame_normalized = frame_resized / 255.0
+    return np.expand_dims(frame_normalized.astype(np.float32), axis=0)
+
+last_update = 0
+
+def send_to_thingspeak(value):
+    """Send 0 (No Person) or 1 (Person) to ThingSpeak field1"""
+    global last_update
+    now = time.time()
+    if now - last_update < UPDATE_INTERVAL:
+        return  # respect rate limit
+
+    payload = {'api_key': THINGSPEAK_WRITE_KEY, 'field1': value}
+    try:
+        r = requests.get(THINGSPEAK_URL, params=payload, timeout=8)
+        if r.status_code == 200:
+            print(f"[ThingSpeak] Sent value={value}")
+            last_update = now
+        else:
+            print("[ThingSpeak] HTTP error:", r.status_code, r.text)
+    except Exception as e:
+        print("[ThingSpeak] Exception:", e)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        continue
+
+    input_data = preprocess_frame(frame)
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    prediction = np.argmax(output_data)
+
+    message = labels[prediction]
+    print("Detected:", message)
+
+    # Send to ThingSpeak (1 if Person, 0 if No Person)
+    if message == "Person":
+        send_to_thingspeak(1)
+    else:
+        send_to_thingspeak(0)
+
+    time.sleep(1)
